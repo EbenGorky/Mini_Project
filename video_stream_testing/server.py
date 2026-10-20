@@ -130,14 +130,14 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
         # Reset / Seek endpoint
         if clean_path in ("/reset13", "/seek"):
             query = self.path.split("?")[1] if "?" in self.path else ""
-            target_sec = 13.0
+            target_sec = 13.6
             if "time=" in query:
                 try:
                     for param in query.split("&"):
                         if param.startswith("time="):
                             target_sec = float(param.split("=")[1])
                 except Exception:
-                    target_sec = 13.0
+                    target_sec = 13.6
 
             self.broadcaster.seek(target_sec)
             self.send_response(200)
@@ -270,7 +270,7 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
   <div class="stream-card">
     <img src="/stream" alt="Connecting to stream..." />
     <div class="controls-bar">
-      <button class="btn-reset" onclick="seekTo(13)">⏪ Reset to 13s</button>
+      <button class="btn-reset" onclick="seekTo(13.6)">⏪ Reset Crane (13.6s)</button>
       <button class="btn-secondary" onclick="seekTo(0)">⏮️ Restart 0s</button>
       <button class="btn-secondary" onclick="seekTo(30)">⏩ Jump to 30s</button>
       <button class="btn-secondary" onclick="seekTo(60)">⏩ Jump to 60s</button>
@@ -294,10 +294,10 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
         })
         .catch(err => console.error('Seek error:', err));
     }
-    // Keyboard shortcut 'r' or '1' to reset to 13s
+    // Keyboard shortcut 'r' or '1' to reset to crane lift (13.6s)
     window.addEventListener('keydown', (e) => {
       if (e.key === 'r' || e.key === '1') {
-        seekTo(13);
+        seekTo(13.6);
       }
     });
   </script>

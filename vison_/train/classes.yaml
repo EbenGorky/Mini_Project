@@ -1,0 +1,114 @@
+# ===================================================================
+# Construction Safety Detection Taxonomy & Risk Mapping
+# ===================================================================
+# Used for fine-tuning YOLOv8/YOLO11 on custom construction site datasets
+# (e.g., Roboflow Construction Safety, SHWD, Pictor-PPE, or ESP32-CAM footage).
+
+# Class Names Index List for YOLO data.yaml
+names:
+  0: worker
+  1: hard_hat
+  2: no_hard_hat
+  3: safety_vest
+  4: no_safety_vest
+  5: crane
+  6: suspended_load
+  7: excavator
+  8: heavy_truck
+  9: forklift
+  10: traffic_cone
+  11: barrier
+  12: hazard_tape
+  13: warning_sign
+  14: no_entry_sign
+  15: danger_sign
+
+# Semantic Category & Risk Rule Mapping
+class_rules:
+  worker:
+    category: "WORKER"
+    base_risk: "Low"
+    description: "Construction site personnel"
+
+  hard_hat:
+    category: "PPE_HELMET"
+    base_risk: "Low"
+    description: "Approved protective safety helmet"
+
+  no_hard_hat:
+    category: "NO_PPE"
+    base_risk: "Medium"
+    alert_message: "SAFETY VIOLATION: Worker detected without hard hat"
+
+  safety_vest:
+    category: "PPE_VEST"
+    base_risk: "Low"
+    description: "High-visibility fluorescent safety vest"
+
+  no_safety_vest:
+    category: "NO_PPE"
+    base_risk: "Medium"
+    alert_message: "SAFETY VIOLATION: Worker detected without hi-vis vest"
+
+  crane:
+    category: "CRANE"
+    base_risk: "Medium"
+    drop_zone_projection: true
+    alert_message: "Overhead crane operating — maintain safe lifting radius"
+
+  suspended_load:
+    category: "SUSPENDED_LOAD"
+    base_risk: "High"
+    drop_zone_projection: true
+    alert_message: "CRITICAL HAZARD: Suspended load overhead! Keep drop zone clear"
+
+  excavator:
+    category: "MACHINERY"
+    base_risk: "High"
+    proximity_padding_ratio: 0.35
+    alert_message: "Heavy excavator in operating range — maintain clear perimeter"
+
+  heavy_truck:
+    category: "MACHINERY"
+    base_risk: "High"
+    proximity_padding_ratio: 0.30
+    alert_message: "Site vehicle in transit — yield right-of-way"
+
+  forklift:
+    category: "MACHINERY"
+    base_risk: "High"
+    proximity_padding_ratio: 0.30
+    alert_message: "Forklift operating — watch blind spots"
+
+  traffic_cone:
+    category: "BARRIER"
+    base_risk: "Medium"
+    perimeter_tracking: true
+    alert_message: "Traffic cone boundary detected — area restricted"
+
+  barrier:
+    category: "BARRIER"
+    base_risk: "High"
+    perimeter_tracking: true
+    alert_message: "Physical barrier ahead — do not enter restricted zone"
+
+  hazard_tape:
+    category: "BARRIER"
+    base_risk: "High"
+    perimeter_tracking: true
+    alert_message: "RESTRICTED BOUNDARY: Yellow/black hazard tape ahead — do not cross"
+
+  warning_sign:
+    category: "SIGN"
+    base_risk: "Medium"
+    alert_message: "Warning sign ahead — proceed with caution"
+
+  no_entry_sign:
+    category: "SIGN"
+    base_risk: "High"
+    alert_message: "NO ENTRY: Restricted construction zone — authorized personnel only"
+
+  danger_sign:
+    category: "SIGN"
+    base_risk: "High"
+    alert_message: "DANGER: High hazard area — immediate caution required"

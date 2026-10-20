@@ -82,6 +82,9 @@ class HazardEngine:
         workers = [d for d in detections if d.category == HazardCategory.WORKER]
         cranes = [d for d in detections if d.category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD)]
         machinery = [d for d in detections if d.category == HazardCategory.MACHINERY]
+        barriers = [d for d in detections if d.category == HazardCategory.BARRIER]
+        signs = [d for d in detections if d.category == HazardCategory.SIGN]
+        no_ppe = [d for d in detections if d.category == HazardCategory.NO_PPE]
 
         # 1. Process Cranes & Suspended Loads (Overhead Drop Zone Threat)
         crane_zones_found = False
@@ -119,6 +122,24 @@ class HazardEngine:
             zone = self._create_machinery_zone(mach, idx, w, h, workers)
             if zone:
                 active_zones.append(zone)
+
+        # 3. Process Barriers, Cones & Hazard Tape Zones
+        for idx, bar in enumerate(barriers):
+            zone = self._create_barrier_zone(bar, idx, w, h, workers)
+            if zone:
+                active_zones.append(zone)
+
+        # 4. Process Safety Signs (Danger, No Entry, Caution)
+        for idx, sign in enumerate(signs):
+            zone = self._create_sign_zone(sign, idx, w, h)
+            if zone:
+                active_zones.append(zone)
+
+        # 5. Process Missing PPE Violations
+        if no_ppe:
+            ppe_zone = self._create_ppe_zone(no_ppe, w, h)
+            if ppe_zone:
+                active_zones.append(ppe_zone)
 
         # Determine overall risk level and primary suggestion message
         overall_risk = RiskLevel.LOW
@@ -290,6 +311,142 @@ class HazardEngine:
             message=msg,
             is_breached=is_breached,
             breached_workers=breached_workers,
+        )
+
+    def _create_barrier_zone(
+        self,
+        barrier: Detection,
+        idx: int,
+        w: int,
+        h: int,
+        workers: List[Detection],
+    ) -> Optional[HazardZone]:
+        """
+        Create restricted perimeter zone for hazard tape, cones, and barricades.
+        """
+        x1, y1, x2, y2 = barrier.box
+        bw = max(40, x2 - x1)
+        bh = max(20, y2 - y1)
+
+        # Extend slightly into ground area behind barrier/tape
+        pad_x = int(bw * 0.15)
+        pad_y = int(bh * 0.40)
+
+        gx1 = max(5, x1 - pad_x)
+        gy1 = max(5, y1)
+        gx2 = min(w - 5, x2 + pad_x)
+        gy2 = min(h - 5, y2 + pad_y)
+
+        raw_poly = np.array([
+            [gx1, gy1],
+            [gx2, gy1],
+            [gx2, gy2],
+            [gx1, gy2],
+        ], dtype=np.float32)
+
+        zone_id = f"barrier_{idx}"
+        smoothed_poly = self._smooth_polygon(zone_id, raw_poly)
+        int_poly = smoothed_poly.astype(np.int32)
+
+        # Proximity check: Is wearer or worker approaching?
+        is_near = (y2 > h * 0.58)
+        wearer_pt = (w // 2, int(h * 0.90))
+        wearer_breach = cv2.pointPolygonTest(int_poly, (float(wearer_pt[0]), float(wearer_pt[1])), True) >= -15
+
+        is_high = is_near or wearer_breach
+        risk = RiskLevel.HIGH if is_high else RiskLevel.MEDIUM
+        title = "RESTRICTED BOUNDARY" if "tape" in barrier.class_name.lower() else "HAZARD PERIMETER"
+        msg = "Hazard tape / boundary ahead — DO NOT CROSS!" if is_high else "Safety barrier / marking detected ahead."
+
+        return HazardZone(
+            zone_id=zone_id,
+            zone_type="hazard_tape_zone",
+            risk_level=risk,
+            ground_polygon=int_poly,
+            source_box=barrier.box,
+            vertical_tracers=[],
+            title=title,
+            message=msg,
+            is_breached=wearer_breach,
+            breached_workers=[],
+        )
+
+    def _create_sign_zone(
+        self,
+        sign: Detection,
+        idx: int,
+        w: int,
+        h: int,
+    ) -> Optional[HazardZone]:
+        """
+        Project directional hazard zone ahead of safety sign.
+        """
+        x1, y1, x2, y2 = sign.box
+        name = sign.class_name.lower()
+
+        # Is this an absolute stop / no entry / danger sign?
+        is_danger = any(k in name for k in ("no_entry", "danger", "stop", "prohibited"))
+
+        # Projection ground trapezoid in front of sign
+        sw = max(30, x2 - x1)
+        cx = (x1 + x2) // 2
+        top_y = min(h - 80, y2 + 10)
+        bot_y = min(h - 20, top_y + 120)
+
+        raw_poly = np.array([
+            [max(10, cx - sw), top_y],
+            [min(w - 10, cx + sw), top_y],
+            [min(w - 10, cx + sw * 2), bot_y],
+            [max(10, cx - sw * 2), bot_y],
+        ], dtype=np.float32)
+
+        zone_id = f"sign_{idx}"
+        smoothed_poly = self._smooth_polygon(zone_id, raw_poly)
+        int_poly = smoothed_poly.astype(np.int32)
+
+        risk = RiskLevel.HIGH if is_danger else RiskLevel.MEDIUM
+        title = "RESTRICTED ACCESS" if is_danger else "CAUTION SIGN"
+        msg = f"{sign.class_name.upper()} ahead — stop and check clearance!" if is_danger else "Caution sign ahead — proceed with vigilance."
+
+        return HazardZone(
+            zone_id=zone_id,
+            zone_type="sign_zone",
+            risk_level=risk,
+            ground_polygon=int_poly,
+            source_box=sign.box,
+            vertical_tracers=[],
+            title=title,
+            message=msg,
+            is_breached=False,
+            breached_workers=[],
+        )
+
+    def _create_ppe_zone(
+        self,
+        violations: List[Detection],
+        w: int,
+        h: int,
+    ) -> Optional[HazardZone]:
+        """
+        Create warning zone for workers detected without required PPE.
+        """
+        first = violations[0]
+        x1, y1, x2, y2 = first.box
+        poly = np.array([
+            [x1, y1], [x2, y1], [x2, y2], [x1, y2]
+        ], dtype=np.int32)
+
+        return HazardZone(
+            zone_id="ppe_violation",
+            zone_type="ppe_violation",
+            risk_level=RiskLevel.MEDIUM,
+            ground_polygon=poly,
+            source_box=first.box,
+            vertical_tracers=[],
+            title="PPE COMPLIANCE ALERT",
+            message="Person without required PPE (hard hat/vest) in view",
+            is_breached=False,
+            breached_workers=violations,
         )
 
     def _smooth_polygon(self, zone_id: str, poly: np.ndarray) -> np.ndarray:

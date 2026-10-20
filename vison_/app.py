@@ -35,6 +35,8 @@ from core.capture import (
 )
 from core.detector import YOLODetector
 from core.hazards import HazardEngine, RiskLevel
+from core.markings import MarkingDetector
+from core.alerts import AlertManager
 from core.overlay import OverlayUI
 
 
@@ -164,6 +166,14 @@ class HelmetVisionApp:
         print("[INFO] Initializing hazard & drop-zone analysis engine...")
         self.hazard_engine = HazardEngine(config=self.config)
 
+        # Initialize Marking & Sign Detection Engine (Milestone 4)
+        print("[INFO] Initializing markings & hazard-tape detector...")
+        self.marking_detector = MarkingDetector(config=self.config)
+
+        # Initialize Alerts & Incident Logging Manager (Milestone 5)
+        print("[INFO] Initializing alerts & event logging manager...")
+        self.alert_manager = AlertManager(config=self.config)
+
         self.running = False
 
     def on_connect_requested(self, new_ip: str) -> None:
@@ -237,10 +247,16 @@ class HelmetVisionApp:
                 suggestion_msg = None
 
                 if has_frame and frame is not None:
-                    detections = self.detector.detect(frame)
+                    # Run YOLO object detection (Milestone 2)
+                    yolo_dets = self.detector.detect(frame)
                     status["inference_ms"] = round(self.detector.last_inference_ms, 1)
 
-                    # 4. Compute Danger Zones & Drop Zone Threats (Milestone 3)
+                    # Run Markings & Sign detection (Milestone 4)
+                    marking_dets = self.marking_detector.detect(frame)
+                    generic_markings = self.marking_detector.to_generic_detections(marking_dets)
+                    detections = yolo_dets + generic_markings
+
+                    # Compute Danger Zones, Drop Zones & Safety Perimeters (Milestone 3 & 4)
                     hazards, overall_risk, suggestion_msg = self.hazard_engine.process(frame.shape, detections)
                     status["risk_level"] = overall_risk.value
                     status["active_hazards"] = len(hazards)
@@ -255,6 +271,10 @@ class HelmetVisionApp:
                     overall_risk=overall_risk,
                     suggestion_msg=suggestion_msg,
                 )
+
+                # 6. Audio Alarms & Incident Logging (Milestone 5)
+                if has_frame and frame is not None:
+                    self.alert_manager.process(overall_risk, hazards, suggestion_msg, rendered)
 
                 # 4. Display or log
                 if not self.headless:

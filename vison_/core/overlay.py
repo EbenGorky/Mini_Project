@@ -125,7 +125,19 @@ class OverlayUI:
             scale_x = self.target_width / w_orig if w_orig > 0 else 1.0
             scale_y = self.target_height / h_orig if h_orig > 0 else 1.0
 
-        # 1. Draw Ground Danger Zones (Drop zones, Crane threats)
+        # 1. Check Scene Transition / Blank Screen
+        is_transition = frame is not None and float(frame.mean()) < 3.5
+        if is_transition:
+            h_c, w_c = canvas.shape[:2]
+            trans_msg = "🎬 SCENE TRANSITION / VIDEO CUT"
+            (tw, th), _ = cv2.getTextSize(trans_msg, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            tx = (w_c - tw) // 2
+            ty = h_c // 2
+            cv2.rectangle(canvas, (tx - 16, ty - th - 12), (tx + tw + 16, ty + 12), (30, 30, 30), -1)
+            cv2.rectangle(canvas, (tx - 16, ty - th - 12), (tx + tw + 16, ty + 12), self.c_accent, 1)
+            cv2.putText(canvas, trans_msg, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.55, self.c_accent, 2, cv2.LINE_AA)
+
+        # 2. Draw Ground Danger Zones (Drop zones, Crane threats, Hazard Tape)
         if frame is not None and hazards:
             self._draw_hazard_zones(canvas, hazards, scale_x, scale_y)
 
@@ -202,13 +214,15 @@ class OverlayUI:
                 cv2.circle(canvas, sp1, 4, color, -1)
                 cv2.circle(canvas, sp2, 4, color, -1)
 
-            # 3. Highlight Crane / Suspended Load source box
+            # 3. Highlight source box
             bx1, by1, bx2, by2 = zone.source_box
             sbx1, sby1, sbx2, sby2 = int(bx1 * scale_x), int(by1 * scale_y), int(bx2 * scale_x), int(by2 * scale_y)
-            cv2.rectangle(canvas, (sbx1, sby1), (sbx2, sby2), color, 3, cv2.LINE_AA)
+            cv2.rectangle(canvas, (sbx1, sby1), (sbx2, sby2), color, 2, cv2.LINE_AA)
+
+            box_label = getattr(zone, "title", "HAZARD ZONE")
             cv2.putText(
                 canvas,
-                "CRANE / SUSPENDED LOAD",
+                box_label,
                 (sbx1 + 4, max(18, sby1 - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.46,
@@ -220,7 +234,21 @@ class OverlayUI:
             # 4. Badge on Ground Footprint
             cx = int(scaled_poly[:, 0].mean())
             cy = int(scaled_poly[:, 1].mean())
-            badge_txt = "⚠️ HIGH RISK: DROP ZONE" if is_high else "⚠️ DROP ZONE: SUSPENDED LOAD"
+
+            ztype = getattr(zone, "zone_type", "")
+            if ztype == "suspended_drop_zone":
+                badge_txt = "⚠️ HIGH RISK: DROP ZONE" if is_high else "⚠️ DROP ZONE: SUSPENDED LOAD"
+            elif ztype == "machinery_zone":
+                badge_txt = "⚠️ MACHINERY HAZARD ZONE"
+            elif ztype == "hazard_tape_zone":
+                badge_txt = "⛔ RESTRICTED: HAZARD TAPE / PERIMETER"
+            elif ztype == "sign_zone":
+                badge_txt = "⚠️ SAFETY SIGN CONTROL ZONE"
+            elif ztype == "ppe_violation":
+                badge_txt = "⚠️ PPE VIOLATION"
+            else:
+                badge_txt = f"⚠️ {getattr(zone, 'title', 'HAZARD ZONE')}"
+
             (tw, th), _ = cv2.getTextSize(badge_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
             cv2.rectangle(canvas, (cx - tw // 2 - 6, cy - th - 4), (cx + tw // 2 + 6, cy + 4), (15, 15, 15), -1)
             cv2.rectangle(canvas, (cx - tw // 2 - 6, cy - th - 4), (cx + tw // 2 + 6, cy + 4), color, 1)
