@@ -300,6 +300,16 @@ class YOLODetector:
                         cls_name = self.model.names.get(cls_id, f"cls_{cls_id}")
                         x1, y1, x2, y2 = map(int, box)
                         category = self.categorize_class(cls_name, box=(x1, y1, x2, y2), frame_h=h_frame)
+
+                        # Filter out all irrelevant non-construction objects (e.g. clock, surfboard)
+                        if category == HazardCategory.OTHER:
+                            continue
+
+                        # Strict confidence threshold: 0.25 for standard classes, 0.15 for crane/load aloft
+                        min_req_conf = 0.15 if category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD) else 0.25
+                        if float(conf) < min_req_conf:
+                            continue
+
                         color = self.CATEGORY_COLORS.get(category, (180, 180, 180))
 
                         detections.append(

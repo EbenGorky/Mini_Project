@@ -87,6 +87,7 @@ class MarkingDetector:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         m_cfg = config.get("markings", {})
+        self.enabled = bool(m_cfg.get("enabled", False))
         tape_cfg = m_cfg.get("hazard_tape", {})
 
         # Yellow HSV range for hazard tape / safety markings
@@ -122,7 +123,7 @@ class MarkingDetector:
         Run marking and sign detection on frame.
         Applies temporal confirmation so random 1-frame glitches are silently dropped.
         """
-        if frame is None or frame.size == 0:
+        if not self.enabled or frame is None or frame.size == 0:
             return []
 
         h, w = frame.shape[:2]
@@ -244,45 +245,45 @@ class MarkingDetector:
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < self.min_tape_area:
+            if area < max(1200, self.min_tape_area):
                 continue
 
             x, y, bw, bh = cv2.boundingRect(cnt)
-            # Aspect ratio check: tape is typically wide or long diagonal
+            # Aspect ratio check: tape is an elongated ribbon
             aspect = max(bw / max(1, bh), bh / max(1, bw))
-            if aspect < self.min_aspect_ratio and area < 1500:
+            if aspect < 4.0 or max(bw, bh) < 130:
                 continue
 
-            # Check striped texture / black frequency within yellow bounding box
-            roi_hsv = hsv[y : y + bh, x : x + bw]
-            if roi_hsv.size == 0:
+            # Check alternating stripes (tape must have alternating stripes, not solid dirt or paint)
+            roi_v = hsv[y : y + bh, x : x + bw, 2]
+            if roi_v.size == 0:
                 continue
-            dark_pixels = (roi_hsv[:, :, 2] < 70).sum()
-            dark_ratio = dark_pixels / (bw * bh)
 
-            # Tape typically has 10% - 60% black diagonal stripes or high-vis strip
-            has_stripes = 0.08 <= dark_ratio <= 0.65 or aspect > 3.5
+            prof = roi_v.mean(axis=0) if bw >= bh else roi_v.mean(axis=1)
+            diff = np.diff(prof > prof.mean())
+            transitions = np.count_nonzero(diff)
+            if transitions < 3:
+                continue
 
-            if has_stripes:
-                is_near = (y + bh) > (h * self.proximity_ratio)
-                approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
-                poly = approx.reshape(-1, 2)
+            is_near = (y + bh) > (h * self.proximity_ratio)
+            approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
+            poly = approx.reshape(-1, 2)
 
-                results.append(
-                    MarkingDetection(
-                        marking_type=MarkingType.HAZARD_TAPE,
-                        box=(x, y, x + bw, y + bh),
-                        polygon=poly,
-                        confidence=min(0.95, 0.50 + aspect * 0.05),
-                        label="HAZARD TAPE",
-                        is_proximity_hazard=is_near,
-                    )
+            results.append(
+                MarkingDetection(
+                    marking_type=MarkingType.HAZARD_TAPE,
+                    box=(x, y, x + bw, y + bh),
+                    polygon=poly,
+                    confidence=min(0.95, 0.60 + aspect * 0.05),
+                    label="HAZARD TAPE",
+                    is_proximity_hazard=is_near,
                 )
+            )
 
         return results
 
     def _detect_cones_and_barriers(self, hsv: np.ndarray, w: int, h: int) -> List[MarkingDetection]:
-        """Detect safety orange traffic cones and barricades."""
+        """Detect safety orange traffic cones and barricades with strict geometric filtering."""
         results: List[MarkingDetection] = []
         orange_mask = cv2.inRange(hsv, self.orange_lower, self.orange_upper)
         morphed = cv2.morphologyEx(orange_mask, cv2.MORPH_OPEN, self.kernel_clean)
@@ -292,27 +293,32 @@ class MarkingDetector:
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 300:
+            if area < 500:
                 continue
 
             x, y, bw, bh = cv2.boundingRect(cnt)
-            # Cones are vertically taller than wide (bh > bw) or barriers are wide
             aspect = bh / max(1, bw)
 
-            if aspect >= 1.1 and bh >= 25:
-                # Triangular / tapering cone check
-                is_near = (y + bh) > (h * self.proximity_ratio)
-                results.append(
-                    MarkingDetection(
-                        marking_type=MarkingType.CONE,
-                        box=(x, y, x + bw, y + bh),
-                        polygon=cnt.reshape(-1, 2),
-                        confidence=0.75,
-                        label="TRAFFIC CONE",
-                        is_proximity_hazard=is_near,
+            if aspect >= 1.3 and bh >= 35:
+                # Triangular tapering: top 25% width must be significantly narrower than base
+                roi_mask = orange_mask[y : y + bh, x : x + bw]
+                top_slice = roi_mask[: max(1, bh // 4), :]
+                bot_slice = roi_mask[max(0, 3 * bh // 4) :, :]
+                top_w = np.count_nonzero(top_slice.sum(axis=0))
+                bot_w = np.count_nonzero(bot_slice.sum(axis=0))
+                if bot_w > 0 and (top_w / bot_w) < 0.65:
+                    is_near = (y + bh) > (h * self.proximity_ratio)
+                    results.append(
+                        MarkingDetection(
+                            marking_type=MarkingType.CONE,
+                            box=(x, y, x + bw, y + bh),
+                            polygon=cnt.reshape(-1, 2),
+                            confidence=0.80,
+                            label="TRAFFIC CONE",
+                            is_proximity_hazard=is_near,
+                        )
                     )
-                )
-            elif bw >= 80 and area > 1000:
+            elif bw >= 140 and area > 1600:
                 # Horizontal orange barricade
                 is_near = (y + bh) > (h * self.proximity_ratio)
                 results.append(
@@ -320,7 +326,7 @@ class MarkingDetector:
                         marking_type=MarkingType.BARRIER,
                         box=(x, y, x + bw, y + bh),
                         polygon=cnt.reshape(-1, 2),
-                        confidence=0.70,
+                        confidence=0.75,
                         label="SAFETY BARRIER",
                         is_proximity_hazard=is_near,
                     )
@@ -335,10 +341,9 @@ class MarkingDetector:
         w: int,
         h: int,
     ) -> List[MarkingDetection]:
-        """Detect circular/octagonal red no-entry/stop signs and yellow caution signs."""
+        """Detect circular/octagonal red signs with internal white text contrast."""
         results: List[MarkingDetection] = []
 
-        # Red mask for Stop / No-Entry signs
         m1 = cv2.inRange(hsv, self.red1_lower, self.red1_upper)
         m2 = cv2.inRange(hsv, self.red2_lower, self.red2_upper)
         red_mask = cv2.bitwise_or(m1, m2)
@@ -348,28 +353,32 @@ class MarkingDetector:
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 600 or area > (w * h * 0.40):
+            if area < 1000 or area > (w * h * 0.30):
                 continue
 
             x, y, bw, bh = cv2.boundingRect(cnt)
             ratio = bw / max(1, bh)
-            # Signs are roughly square / circular (ratio 0.7 to 1.3)
-            if 0.70 <= ratio <= 1.35 and bw >= 24:
-                # Check circularity or polygon symmetry
+            if 0.80 <= ratio <= 1.25 and bw >= 32:
                 perimeter = cv2.arcLength(cnt, True)
                 circularity = (4 * np.pi * area) / max(1.0, (perimeter * perimeter))
 
-                if circularity > 0.45:
-                    results.append(
-                        MarkingDetection(
-                            marking_type=MarkingType.SIGN_NO_ENTRY,
-                            box=(x, y, x + bw, y + bh),
-                            polygon=cnt.reshape(-1, 2),
-                            confidence=0.82,
-                            label="NO ENTRY / DANGER SIGN",
-                            is_proximity_hazard=True,
-                        )
-                    )
+                if circularity > 0.60:
+                    # Check internal contrast: real signs have white text/symbol in center
+                    roi_hsv = hsv[y + bh // 4 : y + 3 * bh // 4, x + bw // 4 : x + 3 * bw // 4]
+                    if roi_hsv.size > 0:
+                        white_pixels = np.logical_and(roi_hsv[:, :, 2] > 180, roi_hsv[:, :, 1] < 50).sum()
+                        white_ratio = white_pixels / (roi_hsv.shape[0] * roi_hsv.shape[1])
+                        if white_ratio >= 0.04:
+                            results.append(
+                                MarkingDetection(
+                                    marking_type=MarkingType.SIGN_NO_ENTRY,
+                                    box=(x, y, x + bw, y + bh),
+                                    polygon=cnt.reshape(-1, 2),
+                                    confidence=0.88,
+                                    label="NO ENTRY / DANGER SIGN",
+                                    is_proximity_hazard=True,
+                                )
+                            )
 
         return results
 

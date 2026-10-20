@@ -85,20 +85,22 @@ hazards:
       message: "Person without required PPE in view"
 
 # Markings & Sign Detection (Milestone 4)
+# Classical HSV segmentation for physical hazard tape, cones, and safety signs.
+# Set enabled to true when monitoring sites with yellow/black hazard tape or cones.
 markings:
-  enabled: true
+  enabled: false
   hazard_tape:
-    yellow_hsv_lower: [18, 90, 80]
-    yellow_hsv_upper: [36, 255, 255]
-    min_contour_area: 400
-    min_aspect_ratio: 2.0
-    proximity_y_ratio: 0.60
+    yellow_hsv_lower: [18, 110, 100]
+    yellow_hsv_upper: [34, 255, 255]
+    min_contour_area: 1200
+    min_aspect_ratio: 4.0
+    proximity_y_ratio: 0.80
   cones:
     enabled: true
-    min_contour_area: 300
+    min_contour_area: 500
   signs:
     enabled: true
-    min_contour_area: 600
+    min_contour_area: 1000
 
 # Alerts & Logging (for Milestone 5)
 alerts:

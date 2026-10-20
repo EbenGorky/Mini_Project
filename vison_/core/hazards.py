@@ -87,21 +87,36 @@ class HazardEngine:
         no_ppe = [d for d in detections if d.category == HazardCategory.NO_PPE]
 
         # 1. Process Cranes & Suspended Loads (Overhead Drop Zone Threat)
-        # Deduplicate overlapping sub-boxes (e.g. hook box inside suspended container box)
-        unique_cranes: List[Detection] = []
-        for c in sorted(cranes, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]), reverse=True):
-            cx1, cy1, cx2, cy2 = c.box
-            is_sub = False
-            for uc in unique_cranes:
-                ux1, uy1, ux2, uy2 = uc.box
-                if cx1 >= ux1 - 15 and cy1 >= uy1 - 15 and cx2 <= ux2 + 15 and cy2 <= uy2 + 15:
-                    is_sub = True
-                    break
-            if not is_sub:
-                unique_cranes.append(c)
+        # Separate overhead loads vs crane tower structures
+        tower_cranes = [c for c in cranes if c.category == HazardCategory.CRANE]
+        suspended_loads = [c for c in cranes if c.category == HazardCategory.SUSPENDED_LOAD]
+
+        # Cluster all aloft load components (hook, sling, container) into ONE unified load target
+        unified_targets: List[Detection] = []
+        if suspended_loads:
+            min_x1 = min(d.box[0] for d in suspended_loads)
+            min_y1 = min(d.box[1] for d in suspended_loads)
+            max_x2 = max(d.box[2] for d in suspended_loads)
+            max_y2 = max(d.box[3] for d in suspended_loads)
+            max_conf = max(d.confidence for d in suspended_loads)
+            unified_targets.append(
+                Detection(
+                    box=(min_x1, min_y1, max_x2, max_y2),
+                    confidence=max_conf,
+                    class_id=-1,
+                    class_name="suspended_load",
+                    category=HazardCategory.SUSPENDED_LOAD,
+                    color=(0, 0, 255),
+                )
+            )
+
+        # Include single largest tower crane structure if detected
+        if tower_cranes:
+            largest_crane = max(tower_cranes, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]))
+            unified_targets.append(largest_crane)
 
         crane_zones_found = False
-        for idx, crane in enumerate(unique_cranes):
+        for idx, crane in enumerate(unified_targets):
             zone = self._create_suspended_load_zone(crane, idx, w, h, workers)
             if zone:
                 active_zones.append(zone)
