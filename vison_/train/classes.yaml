@@ -112,3 +112,4 @@ class_rules:
     category: "SIGN"
     base_risk: "High"
     alert_message: "DANGER: High hazard area — immediate caution required"
+

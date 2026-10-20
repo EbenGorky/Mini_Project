@@ -270,3 +270,4 @@ class MarkingDetector:
                 )
             )
         return generic_dets
+

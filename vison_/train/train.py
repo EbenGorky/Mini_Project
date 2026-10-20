@@ -183,3 +183,4 @@ def run_training(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     cli_args = parse_args()
     run_training(cli_args)
+

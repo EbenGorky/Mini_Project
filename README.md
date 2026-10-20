@@ -126,3 +126,4 @@ cd vison_
 | `markings.hazard_tape.yellow_hsv_lower` | `[18, 90, 80]` | HSV segmentation lower threshold |
 | `alerts.beep_on_high_risk` | `true` | Audio alarms for high-risk threats |
 | `alerts.save_snapshots` | `true` | Save annotated violation snapshots to `logs/snapshots/` |
+

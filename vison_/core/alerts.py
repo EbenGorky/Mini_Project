@@ -205,3 +205,4 @@ class AlertManager:
                 f.write(json.dumps(event_obj) + "\n")
         except Exception as exc:
             print(f"[ALERTS WARN] Failed to write JSON event: {exc}")
+
