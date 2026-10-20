@@ -232,9 +232,9 @@ class YOLODetector:
         if box and frame_h:
             x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
 
-            # 1. Crane vertical mast / boom (e.g. left tower structure)
-            if (any(c in name for c in ("crane", "bird")) or (x1 < 120 and y2 > frame_h * 0.50)):
-                if y1 < frame_h * 0.35 and (x1 < 250 or "crane" in name):
+            # 1. Crane vertical mast / boom (e.g. left tower structure or right crawler crane)
+            if (any(c in name for c in ("crane", "bird", "truck", "car")) or (x1 < 150 and y2 > frame_h * 0.50) or (x1 > 880 and y2 > frame_h * 0.50)):
+                if y1 < frame_h * 0.35 and (x1 < 250 or x2 > 950 or "crane" in name):
                     return HazardCategory.CRANE
 
             # 2. Suspended load (aloft in the air, starts high y1 < 0.50*H, hanging down above floor)
@@ -305,8 +305,14 @@ class YOLODetector:
                         if category == HazardCategory.OTHER:
                             continue
 
-                        # Strict confidence threshold: 0.25 for standard classes, 0.15 for crane/load aloft
-                        min_req_conf = 0.15 if category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD) else 0.25
+                        # Confidence threshold: 0.25 for standard classes, 0.05 for tall crane structures, 0.15 for aloft loads
+                        if category == HazardCategory.CRANE and (x1 < 250 or x2 > 900) and y2 > h_frame * 0.45:
+                            min_req_conf = 0.05
+                        elif category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD):
+                            min_req_conf = 0.15
+                        else:
+                            min_req_conf = 0.25
+
                         if float(conf) < min_req_conf:
                             continue
 
@@ -322,6 +328,10 @@ class YOLODetector:
                                 color=color,
                             )
                         )
+
+            # Detect structural suspended loads (steel beams, girders, precast slabs) aloft in sky
+            aloft_girders = self._detect_aloft_structural_loads(frame)
+            detections.extend(aloft_girders)
 
             # Update temporal tracker to maintain continuous tracking across momentary frame drops
             self._update_tracks(detections)
@@ -437,6 +447,77 @@ class YOLODetector:
                 if t.frames_since_seen == 0:
                     survivors.append(t)
         self.tracked_targets = survivors
+
+    def _detect_aloft_structural_loads(self, frame: np.ndarray) -> List[Detection]:
+        """
+        Detect overhead structural loads (e.g. steel I-beams, girders, precast slabs)
+        suspended in mid-air against sky/clouds where standard COCO has zero classes.
+        """
+        if frame is None or frame.size == 0:
+            return []
+
+        h, w = frame.shape[:2]
+        if float(frame.mean()) < 15.0:
+            return []
+
+        # Sky region aloft where crane loads hang (avoid ground clutter)
+        sky_y1, sky_y2 = int(h * 0.05), int(h * 0.42)
+        sky_x1, sky_x2 = int(w * 0.10), int(w * 0.85)
+        sky = frame[sky_y1:sky_y2, sky_x1:sky_x2]
+        if sky.size == 0:
+            return []
+
+        # Sky region must be predominantly bright outdoor background
+        sky_hsv = cv2.cvtColor(sky, cv2.COLOR_BGR2HSV)
+        if float(sky_hsv[:, :, 2].mean()) < 130:
+            return []
+
+        # Dark structural steel object against bright sky
+        dark_mask = (sky[:, :, 0] < 120) & (sky[:, :, 1] < 120) & (sky[:, :, 2] < 120) & (sky_hsv[:, :, 2] < 130)
+        mask = dark_mask.astype(np.uint8) * 255
+
+        # Morphological opening removes thin crane rigging/cables (<7px)
+        opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
+        # Morphological closing bridges gaps across the solid horizontal girder body
+        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (25, 10)))
+        cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        min_area = max(1800, int(h * w * 0.003))
+        min_bw = max(100, int(w * 0.12))
+
+        results: List[Detection] = []
+        for cnt in cnts:
+            area = cv2.contourArea(cnt)
+            if area < min_area:
+                continue
+
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            aspect = bw / max(1, bh)
+            gx1 = sky_x1 + x
+            gy1 = sky_y1 + y
+            gx2 = sky_x1 + x + bw
+            gy2 = sky_y1 + y + bh
+
+            # Structural girder criteria:
+            # 1. Wide and predominantly horizontal (w >= min_bw, 2.5 <= aspect <= 18.0)
+            # 2. Must be aloft with bright open air / sky below it (not a ground structure)
+            if 2.5 <= aspect <= 18.0 and bw >= min_bw and (gy1 > sky_y1 + 4):
+                below_roi = frame[gy2 : min(h, gy2 + 40), gx1 : gx2]
+                if below_roi.size > 0:
+                    below_v = cv2.cvtColor(below_roi, cv2.COLOR_BGR2HSV)[:, :, 2].mean()
+                    if below_v > 135:
+                        results.append(
+                            Detection(
+                                box=(gx1, gy1, gx2, gy2),
+                                confidence=0.88,
+                                class_id=-1,
+                                class_name="suspended_girder",
+                                category=HazardCategory.SUSPENDED_LOAD,
+                                color=self.CATEGORY_COLORS[HazardCategory.SUSPENDED_LOAD],
+                            )
+                        )
+
+        return results
 
     def draw_detections(
         self,
