@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+**/venv/
+**/.venv/
+
+# Model weights & Large Binaries
+*.pt
+*.onnx
+*.engine
+*.bin
+models/*.pt
+vison_/models/*.pt
+vison_/yolov8n.pt
+
+# Video & Media Files
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.m4a
+*.jpg
+*.jpeg
+*.png
+!vison_/test_media/.gitkeep
+video_stream_testing/*.mp4
+
+# Ultralytics & Runtime Caches
+.ultralytics/
+**/.ultralytics/
+
+# Logs & Event Captures
+logs/
+*.log
+vison_/logs/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+

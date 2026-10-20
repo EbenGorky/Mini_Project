@@ -1,0 +1,75 @@
+# ==========================================
+# Helmet Vision Configuration
+# ==========================================
+
+camera:
+  # Default ESP32-CAM IP (overridden by --ip CLI argument or UI input)
+  default_ip: "192.168.1.50"
+  # Standard ESP32-CAM CameraWebServer MJPEG stream port and path
+  port: 81
+  path: "/stream"
+  # Reconnection settings
+  reconnect_interval_sec: 3.0
+  connection_timeout_sec: 5.0
+  # Internal buffer size (1 keeps latency lowest)
+  buffer_size: 1
+
+display:
+  window_title: "Helmet Vision - Construction Safety Monitor"
+  target_width: 960
+  target_height: 540
+  show_stats: true
+  show_control_bar: true
+  font_scale: 0.6
+  # Color theme (BGR)
+  theme:
+    bg_dark: [24, 24, 24]
+    panel_bg: [40, 40, 40]
+    border: [70, 70, 70]
+    text: [240, 240, 240]
+    accent: [255, 140, 0]      # Safety orange
+    green: [50, 205, 50]       # Low risk / connected
+    amber: [0, 191, 255]       # Medium risk / reconnecting
+    red: [50, 50, 240]         # High risk / offline
+
+video:
+  # Loop playback when reaching EOF in video file mode
+  loop: true
+  target_fps: 30
+
+# Detection settings (for Milestone 2+)
+detection:
+  model_path: "models/yolov8n.pt"
+  confidence_threshold: 0.35
+  iou_threshold: 0.45
+  device: "cuda:0"             # Auto-detects and falls back to CPU
+  imgsz: 640
+  frame_skip: 0                # 0 = every frame on GPU
+
+# Hazard & Risk Rules (for Milestone 3-5)
+hazards:
+  smoothing_frames: 5
+  rules:
+    - condition: "machinery_proximity"
+      risk_level: "High"
+      message: "Vehicle ahead, move clear of its path"
+    - condition: "hazard_tape"
+      risk_level: "High"
+      message: "Hazard tape detected, do not cross"
+    - condition: "no_entry_sign"
+      risk_level: "High"
+      message: "No-entry sign ahead, stop and check"
+    - condition: "cone_line"
+      risk_level: "Medium"
+      message: "Cone line ahead, area restricted"
+    - condition: "missing_ppe"
+      risk_level: "Medium"
+      message: "Person without required PPE in view"
+
+# Alerts & Logging (for Milestone 5)
+alerts:
+  beep_on_high_risk: true
+  log_events: true
+  log_dir: "logs"
+  save_snapshots: true
+

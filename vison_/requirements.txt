@@ -1,0 +1,9 @@
+# Core dependencies for Helmet Vision
+numpy>=1.24.0
+opencv-python>=4.8.0
+pyyaml>=6.0.0
+ultralytics>=8.0.0
+
+# Future milestones (OCR)
+# easyocr>=1.7.0
+
