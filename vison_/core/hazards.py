@@ -56,10 +56,13 @@ class HazardEngine:
         self.drop_margin = float(hz_cfg.get("suspended_load_safety_margin", 1.8))
         self.ground_horizon = float(hz_cfg.get("ground_horizon_ratio", 0.75))
         self.ground_bottom = float(hz_cfg.get("ground_bottom_ratio", 0.95))
+        self.zone_hold_frames = int(hz_cfg.get("zone_hold_frames", 8))
 
-        # Temporal smoothing history: maps zone_id to deque of past polygon coordinates
+        # Temporal smoothing history & zone persistence across momentary misses
         self._poly_history: Dict[str, deque] = {}
         self._last_active_zones: List[HazardZone] = []
+        self._cached_zones: Dict[str, HazardZone] = {}
+        self._zone_decay_counters: Dict[str, int] = {}
 
     def process(
         self,
@@ -81,10 +84,35 @@ class HazardEngine:
         machinery = [d for d in detections if d.category == HazardCategory.MACHINERY]
 
         # 1. Process Cranes & Suspended Loads (Overhead Drop Zone Threat)
+        crane_zones_found = False
         for idx, crane in enumerate(cranes):
             zone = self._create_suspended_load_zone(crane, idx, w, h, workers)
             if zone:
                 active_zones.append(zone)
+                self._cached_zones[zone.zone_id] = zone
+                self._zone_decay_counters[zone.zone_id] = 0
+                crane_zones_found = True
+
+        # Temporal persistence: If crane was briefly missed for 1-8 frames, hold the drop zone steady
+        if not crane_zones_found and self._cached_zones:
+            for zone_id, cached_zone in list(self._cached_zones.items()):
+                counter = self._zone_decay_counters.get(zone_id, 0) + 1
+                self._zone_decay_counters[zone_id] = counter
+                if counter <= self.zone_hold_frames:
+                    # Re-check worker intrusion against cached zone polygon
+                    breached_workers = [
+                        wk for wk in workers
+                        if cv2.pointPolygonTest(cached_zone.ground_polygon, (float(wk.bottom_center[0]), float(wk.bottom_center[1])), False) >= 0
+                    ]
+                    cached_zone.breached_workers = breached_workers
+                    cached_zone.is_breached = len(breached_workers) > 0
+                    if cached_zone.is_breached:
+                        cached_zone.risk_level = RiskLevel.HIGH
+                    active_zones.append(cached_zone)
+                else:
+                    self._cached_zones.pop(zone_id, None)
+                    self._zone_decay_counters.pop(zone_id, None)
+                    self._poly_history.pop(zone_id, None)
 
         # 2. Process Ground Machinery Proximity Zones
         for idx, mach in enumerate(machinery):
@@ -283,3 +311,4 @@ class HazardEngine:
             smoothed += w * p
 
         return smoothed
+

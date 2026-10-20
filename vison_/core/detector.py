@@ -40,6 +40,7 @@ class Detection:
     class_name: str
     category: HazardCategory
     color: Tuple[int, int, int]     # BGR color
+    track_id: Optional[int] = None
 
     @property
     def width(self) -> int:
@@ -60,6 +61,49 @@ class Detection:
     @property
     def bottom_center(self) -> Tuple[int, int]:
         return (self.box[0] + self.box[2]) // 2, self.box[3]
+
+
+def compute_iou(boxA: Tuple[int, int, int, int], boxB: Tuple[int, int, int, int]) -> float:
+    """Compute Intersection-Over-Union between two boxes."""
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+
+    inter_w = max(0, xB - xA)
+    inter_h = max(0, yB - yA)
+    inter_area = inter_w * inter_h
+
+    boxA_area = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxB_area = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+    union_area = float(boxA_area + boxB_area - inter_area)
+
+    return inter_area / union_area if union_area > 0 else 0.0
+
+
+@dataclass
+class TrackedTarget:
+    """Internal tracker target with temporal persistence across frames."""
+    track_id: int
+    box: Tuple[int, int, int, int]
+    confidence: float
+    class_id: int
+    class_name: str
+    category: HazardCategory
+    color: Tuple[int, int, int]
+    frames_since_seen: int = 0
+    hit_streak: int = 1
+
+    def to_detection(self) -> Detection:
+        return Detection(
+            box=self.box,
+            confidence=self.confidence,
+            class_id=self.class_id,
+            class_name=self.class_name,
+            category=self.category,
+            color=self.color,
+            track_id=self.track_id,
+        )
 
 
 class YOLODetector:
@@ -107,6 +151,12 @@ class YOLODetector:
         self.last_inference_ms: float = 0.0
         self._last_detections: List[Detection] = []
         self._frame_counter: int = 0
+
+        # Temporal object tracker state (eliminates split-second flicker)
+        self.tracked_targets: List[TrackedTarget] = []
+        self.next_track_id: int = 1
+        self.max_missed_frames = int(det_cfg.get("max_missed_frames", 8))
+        self.min_iou_match = float(det_cfg.get("min_iou_match", 0.20))
 
     def _resolve_device(self, requested_device: str) -> str:
         """Check CUDA availability and return active torch device."""
@@ -254,14 +304,97 @@ class YOLODetector:
                             )
                         )
 
+            # Update temporal tracker to maintain continuous tracking across momentary frame drops
+            self._update_tracks(detections)
+            active_detections = [t.to_detection() for t in self.tracked_targets]
+
             self.last_inference_ms = (time.time() - t_start) * 1000.0
-            self._last_detections = detections
-            return detections
+            self._last_detections = active_detections
+            return active_detections
 
         except Exception as exc:
             print(f"[DETECTOR ERROR] Inference failed: {exc}")
             self.last_inference_ms = 0.0
             return self._last_detections
+
+    def _update_tracks(self, new_detections: List[Detection]) -> None:
+        """
+        Match incoming detections with existing tracks using IOU.
+        Smooths coordinates and holds objects alive across momentary misses.
+        """
+        unmatched_new = set(range(len(new_detections)))
+        unmatched_existing = set(range(len(self.tracked_targets)))
+
+        matches = []
+        for e_idx, existing in enumerate(self.tracked_targets):
+            best_iou = 0.0
+            best_n_idx = -1
+            for n_idx in unmatched_new:
+                new_d = new_detections[n_idx]
+                cat_match = (
+                    existing.category == new_d.category
+                    or (
+                        existing.category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD)
+                        and new_d.category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD)
+                    )
+                )
+                if cat_match:
+                    iou = compute_iou(existing.box, new_d.box)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_n_idx = n_idx
+
+            if best_iou >= self.min_iou_match and best_n_idx != -1:
+                matches.append((e_idx, best_n_idx))
+                unmatched_existing.discard(e_idx)
+                unmatched_new.discard(best_n_idx)
+
+        # Update matched targets (smooth position coordinates)
+        for e_idx, n_idx in matches:
+            t = self.tracked_targets[e_idx]
+            d = new_detections[n_idx]
+            smooth_box = (
+                int(0.75 * d.box[0] + 0.25 * t.box[0]),
+                int(0.75 * d.box[1] + 0.25 * t.box[1]),
+                int(0.75 * d.box[2] + 0.25 * t.box[2]),
+                int(0.75 * d.box[3] + 0.25 * t.box[3]),
+            )
+            t.box = smooth_box
+            t.confidence = d.confidence
+            t.class_name = d.class_name
+            t.category = d.category
+            t.color = d.color
+            t.frames_since_seen = 0
+            t.hit_streak += 1
+
+        # Hold unmatched existing targets alive across momentary misses
+        for e_idx in unmatched_existing:
+            t = self.tracked_targets[e_idx]
+            t.frames_since_seen += 1
+            t.confidence = max(0.20, t.confidence * 0.95)
+
+        # Spawn new targets for newly detected objects
+        for n_idx in unmatched_new:
+            d = new_detections[n_idx]
+            new_target = TrackedTarget(
+                track_id=self.next_track_id,
+                box=d.box,
+                confidence=d.confidence,
+                class_id=d.class_id,
+                class_name=d.class_name,
+                category=d.category,
+                color=d.color,
+                frames_since_seen=0,
+                hit_streak=1,
+            )
+            self.next_track_id += 1
+            self.tracked_targets.append(new_target)
+
+        # Prune only targets that disappeared for more than max_missed_frames
+        self.tracked_targets = [
+            t for t in self.tracked_targets
+            if t.frames_since_seen <= self.max_missed_frames
+        ]
 
     def draw_detections(
         self,
