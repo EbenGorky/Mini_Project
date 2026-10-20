@@ -48,6 +48,12 @@ detection:
   max_missed_frames: 15        # Keep tracking alive across split-second missed frames (~600ms)
   min_iou_match: 0.18
 
+# Temporal Confirmation Filter (Eliminates single-frame random glitches)
+temporal_filtering:
+  min_confirmation_frames: 2     # Consecutive frames required to confirm detection before drawing on screen
+  marking_min_hits: 2            # Consecutive frames required for hazard tape & signs
+  high_conf_fast_track: 0.55     # High-confidence detections (>0.55) confirm immediately (0ms latency)
+
 # Hazard & Risk Rules (for Milestone 3-5)
 hazards:
   smoothing_frames: 5

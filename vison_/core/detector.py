@@ -158,6 +158,11 @@ class YOLODetector:
         self.max_missed_frames = int(det_cfg.get("max_missed_frames", 8))
         self.min_iou_match = float(det_cfg.get("min_iou_match", 0.20))
 
+        # Temporal Confirmation Filtering (kills random 1-frame glitches)
+        temp_cfg = config.get("temporal_filtering", {})
+        self.min_confirmation_hits = int(temp_cfg.get("min_confirmation_frames", 2))
+        self.fast_track_conf = float(temp_cfg.get("high_conf_fast_track", 0.55))
+
     def _resolve_device(self, requested_device: str) -> str:
         """Check CUDA availability and return active torch device."""
         try:
@@ -310,7 +315,18 @@ class YOLODetector:
 
             # Update temporal tracker to maintain continuous tracking across momentary frame drops
             self._update_tracks(detections)
-            active_detections = [t.to_detection() for t in self.tracked_targets]
+
+            # Temporal Confirmation Filter: Only output confirmed targets (kills 1-frame blips)
+            # Confident detections or overhead crane/load threats confirm immediately
+            active_detections = []
+            for t in self.tracked_targets:
+                is_confirmed = (
+                    t.hit_streak >= self.min_confirmation_hits
+                    or t.confidence >= self.fast_track_conf
+                    or t.category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD)
+                )
+                if is_confirmed and t.frames_since_seen <= self.max_missed_frames:
+                    active_detections.append(t.to_detection())
 
             self.last_inference_ms = (time.time() - t_start) * 1000.0
             self._last_detections = active_detections
@@ -394,11 +410,23 @@ class YOLODetector:
             self.next_track_id += 1
             self.tracked_targets.append(new_target)
 
-        # Prune only targets that disappeared for more than max_missed_frames
-        self.tracked_targets = [
-            t for t in self.tracked_targets
-            if t.frames_since_seen <= self.max_missed_frames
-        ]
+        # Prune candidates:
+        # 1. Unconfirmed candidate (hit_streak < min_hits) that was missed: drop immediately (kills 1-frame glitches!)
+        # 2. Confirmed candidate: allow persistence up to max_missed_frames to eliminate flicker
+        survivors = []
+        for t in self.tracked_targets:
+            is_confirmed = (
+                t.hit_streak >= self.min_confirmation_hits
+                or t.confidence >= self.fast_track_conf
+                or t.category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD)
+            )
+            if is_confirmed:
+                if t.frames_since_seen <= self.max_missed_frames:
+                    survivors.append(t)
+            else:
+                if t.frames_since_seen == 0:
+                    survivors.append(t)
+        self.tracked_targets = survivors
 
     def draw_detections(
         self,

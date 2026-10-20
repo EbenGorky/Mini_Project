@@ -18,6 +18,19 @@ import numpy as np
 from .detector import Detection, HazardCategory
 
 
+def compute_marking_iou(boxA: Tuple[int, int, int, int], boxB: Tuple[int, int, int, int]) -> float:
+    """Calculate Intersection-over-Union between two bounding boxes."""
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    areaA = max(1, (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]))
+    areaB = max(1, (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]))
+    union = areaA + areaB - inter
+    return inter / union if union > 0 else 0.0
+
+
 class MarkingType(str, Enum):
     HAZARD_TAPE = "hazard_tape"
     FLOOR_MARKING = "floor_marking"
@@ -37,6 +50,30 @@ class MarkingDetection:
     confidence: float
     label: str
     is_proximity_hazard: bool = False        # True if close to wearer path (bottom of frame)
+
+
+@dataclass
+class TrackedMarking:
+    """Internal candidate with temporal confirmation across consecutive frames."""
+    track_id: int
+    box: Tuple[int, int, int, int]
+    polygon: np.ndarray
+    marking_type: MarkingType
+    confidence: float
+    label: str
+    is_proximity_hazard: bool
+    hit_streak: int = 1
+    missed_frames: int = 0
+
+    def to_detection(self) -> MarkingDetection:
+        return MarkingDetection(
+            marking_type=self.marking_type,
+            box=self.box,
+            polygon=self.polygon,
+            confidence=self.confidence,
+            label=self.label,
+            is_proximity_hazard=self.is_proximity_hazard,
+        )
 
 
 class MarkingDetector:
@@ -74,9 +111,16 @@ class MarkingDetector:
         self.kernel_tape = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
         self.kernel_clean = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
+        # Temporal Confirmation Filter (kills random 1-frame glitches)
+        temp_cfg = config.get("temporal_filtering", {})
+        self.min_hits = int(temp_cfg.get("marking_min_hits", 2))
+        self.tracked_markings: List[TrackedMarking] = []
+        self._next_track_id = 1
+
     def detect(self, frame: np.ndarray) -> List[MarkingDetection]:
         """
         Run marking and sign detection on frame.
+        Applies temporal confirmation so random 1-frame glitches are silently dropped.
         """
         if frame is None or frame.size == 0:
             return []
@@ -87,21 +131,105 @@ class MarkingDetector:
             return []
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        detections: List[MarkingDetection] = []
+        raw_candidates: List[MarkingDetection] = []
 
         # 1. Detect Yellow/Black Hazard Tape
-        tape_dets = self._detect_hazard_tape(hsv, w, h)
-        detections.extend(tape_dets)
+        raw_candidates.extend(self._detect_hazard_tape(hsv, w, h))
 
         # 2. Detect Traffic Cones / Barriers
-        cone_dets = self._detect_cones_and_barriers(hsv, w, h)
-        detections.extend(cone_dets)
+        raw_candidates.extend(self._detect_cones_and_barriers(hsv, w, h))
 
         # 3. Detect Signs (Red Stop/No-Entry, Caution)
-        sign_dets = self._detect_safety_signs(hsv, frame, w, h)
-        detections.extend(sign_dets)
+        raw_candidates.extend(self._detect_safety_signs(hsv, frame, w, h))
 
-        return detections
+        # 4. Temporal Confirmation: requires candidate to repeat in consecutive frames
+        self._update_candidate_tracks(raw_candidates)
+
+        # Return ONLY confirmed markings (hit_streak >= min_hits)
+        confirmed = [
+            t.to_detection()
+            for t in self.tracked_markings
+            if t.hit_streak >= self.min_hits and t.missed_frames == 0
+        ]
+        return confirmed
+
+    def _update_candidate_tracks(self, raw_candidates: List[MarkingDetection]) -> None:
+        """
+        Match incoming candidates with temporal tracks.
+        Eliminates single-frame blips and smooths real markings.
+        """
+        unmatched_new = set(range(len(raw_candidates)))
+        unmatched_existing = set(range(len(self.tracked_markings)))
+
+        matches = []
+        for e_idx, existing in enumerate(self.tracked_markings):
+            best_iou = 0.0
+            best_n_idx = -1
+            for n_idx in unmatched_new:
+                cand = raw_candidates[n_idx]
+                if cand.marking_type == existing.marking_type:
+                    iou = compute_marking_iou(existing.box, cand.box)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_n_idx = n_idx
+
+            if best_iou >= 0.15 and best_n_idx != -1:
+                matches.append((e_idx, best_n_idx))
+                unmatched_existing.discard(e_idx)
+                unmatched_new.discard(best_n_idx)
+
+        # Update matched candidates
+        for e_idx, n_idx in matches:
+            t = self.tracked_markings[e_idx]
+            cand = raw_candidates[n_idx]
+            # Smooth coordinates
+            t.box = (
+                int(0.70 * cand.box[0] + 0.30 * t.box[0]),
+                int(0.70 * cand.box[1] + 0.30 * t.box[1]),
+                int(0.70 * cand.box[2] + 0.30 * t.box[2]),
+                int(0.70 * cand.box[3] + 0.30 * t.box[3]),
+            )
+            t.polygon = cand.polygon
+            t.confidence = max(t.confidence, cand.confidence)
+            t.is_proximity_hazard = cand.is_proximity_hazard
+            t.hit_streak += 1
+            t.missed_frames = 0
+
+        # Unmatched existing
+        for e_idx in unmatched_existing:
+            t = self.tracked_markings[e_idx]
+            t.missed_frames += 1
+
+        # Spawn new candidates (tentative state with hit_streak=1)
+        for n_idx in unmatched_new:
+            cand = raw_candidates[n_idx]
+            self.tracked_markings.append(
+                TrackedMarking(
+                    track_id=self._next_track_id,
+                    box=cand.box,
+                    polygon=cand.polygon,
+                    marking_type=cand.marking_type,
+                    confidence=cand.confidence,
+                    label=cand.label,
+                    is_proximity_hazard=cand.is_proximity_hazard,
+                    hit_streak=1,
+                    missed_frames=0,
+                )
+            )
+            self._next_track_id += 1
+
+        # Prune candidates:
+        # If tentative candidate (hit_streak < min_hits) is missed: DROP IMMEDIATELY (1-frame glitch!)
+        # If confirmed candidate (hit_streak >= min_hits): allow up to 4 missed frames
+        survivors = []
+        for t in self.tracked_markings:
+            if t.hit_streak < self.min_hits:
+                if t.missed_frames == 0:
+                    survivors.append(t)
+            else:
+                if t.missed_frames <= 4:
+                    survivors.append(t)
+        self.tracked_markings = survivors
 
     def _detect_hazard_tape(self, hsv: np.ndarray, w: int, h: int) -> List[MarkingDetection]:
         """Segment elongated yellow hazard tape boundaries."""

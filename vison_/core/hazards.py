@@ -87,8 +87,21 @@ class HazardEngine:
         no_ppe = [d for d in detections if d.category == HazardCategory.NO_PPE]
 
         # 1. Process Cranes & Suspended Loads (Overhead Drop Zone Threat)
+        # Deduplicate overlapping sub-boxes (e.g. hook box inside suspended container box)
+        unique_cranes: List[Detection] = []
+        for c in sorted(cranes, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]), reverse=True):
+            cx1, cy1, cx2, cy2 = c.box
+            is_sub = False
+            for uc in unique_cranes:
+                ux1, uy1, ux2, uy2 = uc.box
+                if cx1 >= ux1 - 15 and cy1 >= uy1 - 15 and cx2 <= ux2 + 15 and cy2 <= uy2 + 15:
+                    is_sub = True
+                    break
+            if not is_sub:
+                unique_cranes.append(c)
+
         crane_zones_found = False
-        for idx, crane in enumerate(cranes):
+        for idx, crane in enumerate(unique_cranes):
             zone = self._create_suspended_load_zone(crane, idx, w, h, workers)
             if zone:
                 active_zones.append(zone)
@@ -173,9 +186,10 @@ class HazardEngine:
         center_x = (x1 + x2) // 2
         load_w = max(40, x2 - x1)
 
-        # Ground projection coordinates
-        horizon_y = max(int(h * self.ground_horizon), y2 + 40)
-        floor_y = int(h * self.ground_bottom)
+        # Ground projection coordinates (perspective trapezoid directly beneath suspended load)
+        horizon_y = max(int(h * self.ground_horizon), y2 + 25)
+        footprint_depth = min(int(load_w * 0.40), 100)
+        floor_y = min(h - 15, horizon_y + max(40, footprint_depth))
 
         if horizon_y >= floor_y:
             horizon_y = floor_y - 40
@@ -213,8 +227,8 @@ class HazardEngine:
                 breached_workers.append(worker)
 
         # Check camera wearer (screen bottom center represents forward walking path)
-        wearer_pt = (w // 2, int(h * 0.90))
-        wearer_in_zone = cv2.pointPolygonTest(int_poly, (float(wearer_pt[0]), float(wearer_pt[1])), True) >= -30
+        wearer_pt = (w // 2, int(h * 0.92))
+        wearer_in_zone = cv2.pointPolygonTest(int_poly, (float(wearer_pt[0]), float(wearer_pt[1])), False) >= 0
 
         is_breached = len(breached_workers) > 0 or wearer_in_zone
 
@@ -348,12 +362,14 @@ class HazardEngine:
         smoothed_poly = self._smooth_polygon(zone_id, raw_poly)
         int_poly = smoothed_poly.astype(np.int32)
 
-        # Proximity check: Is wearer or worker approaching?
-        is_near = (y2 > h * 0.58)
+        # Proximity check: Is wearer directly approaching boundary?
+        mid_x = (x1 + x2) // 2
+        in_path = abs(mid_x - w // 2) < (w * 0.35)
+        is_close_path = (y2 > h * 0.80) and in_path
         wearer_pt = (w // 2, int(h * 0.90))
-        wearer_breach = cv2.pointPolygonTest(int_poly, (float(wearer_pt[0]), float(wearer_pt[1])), True) >= -15
+        wearer_breach = cv2.pointPolygonTest(int_poly, (float(wearer_pt[0]), float(wearer_pt[1])), True) >= -10
 
-        is_high = is_near or wearer_breach
+        is_high = is_close_path or wearer_breach
         risk = RiskLevel.HIGH if is_high else RiskLevel.MEDIUM
         title = "RESTRICTED BOUNDARY" if "tape" in barrier.class_name.lower() else "HAZARD PERIMETER"
         msg = "Hazard tape / boundary ahead — DO NOT CROSS!" if is_high else "Safety barrier / marking detected ahead."
