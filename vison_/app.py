@@ -247,6 +247,12 @@ class HelmetVisionApp:
                 suggestion_msg = None
 
                 if has_frame and frame is not None:
+                    # Clear temporal state across dark scene transitions
+                    if status.get("is_dark_scene"):
+                        self.detector.reset()
+                        self.marking_detector.reset()
+                        self.hazard_engine.reset()
+
                     # Run YOLO object detection (Milestone 2)
                     yolo_dets = self.detector.detect(frame)
                     status["inference_ms"] = round(self.detector.last_inference_ms, 1)

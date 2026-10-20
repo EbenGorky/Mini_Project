@@ -52,12 +52,12 @@ detection:
 temporal_filtering:
   min_confirmation_frames: 2     # Consecutive frames required to confirm detection before drawing on screen
   marking_min_hits: 2            # Consecutive frames required for hazard tape & signs
-  high_conf_fast_track: 0.55     # High-confidence detections (>0.55) confirm immediately (0ms latency)
+  high_conf_fast_track: 0.85     # Only ultra-high confidence detections (>0.85) confirm immediately (0ms latency)
 
 # Hazard & Risk Rules (for Milestone 3-5)
 hazards:
   smoothing_frames: 5
-  zone_hold_frames: 15         # Hold drop zone steady across momentary detection drops
+  zone_hold_frames: 8          # Hold drop zone steady across momentary detection drops (approx 250ms)
   suspended_load_safety_margin: 1.8
   ground_horizon_ratio: 0.75
   ground_bottom_ratio: 0.95

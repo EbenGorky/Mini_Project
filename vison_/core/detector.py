@@ -220,6 +220,13 @@ class YOLODetector:
         if "vest" in name or "safety_vest" in name:
             return HazardCategory.PPE_VEST
 
+        # Machinery & Vehicles (on ground) - prioritized before aloft heuristics
+        if any(mach in name for mach in (
+            "car", "truck", "bus", "train", "vehicle", "excavator",
+            "forklift", "loader", "tractor", "bulldozer", "roller"
+        )):
+            return HazardCategory.MACHINERY
+
         # Cranes & Overhead Rigging
         if any(c in name for c in ("crane", "tower_crane", "mobile_crane", "derrick", "boom_crane")):
             return HazardCategory.CRANE
@@ -231,23 +238,20 @@ class YOLODetector:
         # High elevation crane structures & suspended loads aloft in mid-air
         if box and frame_h:
             x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+            bw = x2 - x1
+            bh = y2 - y1
+            aspect = bw / max(1, bh)
 
-            # 1. Crane vertical mast / boom (e.g. left tower structure or right crawler crane)
-            if (any(c in name for c in ("crane", "bird", "truck", "car")) or (x1 < 150 and y2 > frame_h * 0.50) or (x1 > 880 and y2 > frame_h * 0.50)):
-                if y1 < frame_h * 0.35 and (x1 < 250 or x2 > 950 or "crane" in name):
+            # 1. Crane vertical mast / boom (e.g. left tower structure at 13.6s)
+            # Must be tall, slender (aspect <= 0.55), on the edge (x1 < 120), spanning >55% of frame
+            if aspect <= 0.55 and bh >= frame_h * 0.55 and y1 < frame_h * 0.20:
+                if "crane" in name or (x1 < 120 and "bird" in name):
                     return HazardCategory.CRANE
 
-            # 2. Suspended load (aloft in the air, starts high y1 < 0.50*H, hanging down above floor)
-            if any(s in name for s in ("kite", "airplane", "sports_ball", "sports ball", "boat", "load", "hook", "rigging", "container", "truck", "car", "box")):
-                if y1 < frame_h * 0.50 and y2 < frame_h * 0.88:
+            # 2. Suspended load (aloft in the air, starts high y1 < 0.45*H, hanging down above floor)
+            if any(s in name for s in ("kite", "load", "hook", "rigging", "container", "crate")):
+                if y1 < frame_h * 0.45 and y2 < frame_h * 0.80 and y2 > frame_h * 0.25:
                     return HazardCategory.SUSPENDED_LOAD
-
-        # Machinery & Vehicles (on ground)
-        if any(mach in name for mach in (
-            "car", "truck", "bus", "train", "vehicle", "excavator",
-            "forklift", "loader", "tractor", "bulldozer", "roller"
-        )):
-            return HazardCategory.MACHINERY
 
         # Signs
         if any(s in name for s in ("sign", "stop_sign", "traffic_light", "warning", "danger", "caution")):
@@ -305,14 +309,8 @@ class YOLODetector:
                         if category == HazardCategory.OTHER:
                             continue
 
-                        # Confidence threshold: 0.25 for standard classes, 0.05 for tall crane structures, 0.15 for aloft loads
-                        if category == HazardCategory.CRANE and (x1 < 250 or x2 > 900) and y2 > h_frame * 0.45:
-                            min_req_conf = 0.05
-                        elif category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD):
-                            min_req_conf = 0.15
-                        else:
-                            min_req_conf = 0.25
-
+                        # Strict confidence threshold: 0.25 for standard classes, 0.20 for aloft loads/cranes
+                        min_req_conf = 0.20 if category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD) else 0.25
                         if float(conf) < min_req_conf:
                             continue
 
@@ -336,14 +334,13 @@ class YOLODetector:
             # Update temporal tracker to maintain continuous tracking across momentary frame drops
             self._update_tracks(detections)
 
-            # Temporal Confirmation Filter: Only output confirmed targets (kills 1-frame blips)
-            # Confident detections or overhead crane/load threats confirm immediately
+            # Temporal Confirmation Filter: Only output confirmed targets (kills 1-frame transient blips)
+            # Objects must persist for >= min_confirmation_hits consecutive frames or high confidence
             active_detections = []
             for t in self.tracked_targets:
                 is_confirmed = (
                     t.hit_streak >= self.min_confirmation_hits
                     or t.confidence >= self.fast_track_conf
-                    or t.category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD)
                 )
                 if is_confirmed and t.frames_since_seen <= self.max_missed_frames:
                     active_detections.append(t.to_detection())
@@ -438,7 +435,6 @@ class YOLODetector:
             is_confirmed = (
                 t.hit_streak >= self.min_confirmation_hits
                 or t.confidence >= self.fast_track_conf
-                or t.category in (HazardCategory.CRANE, HazardCategory.SUSPENDED_LOAD)
             )
             if is_confirmed:
                 if t.frames_since_seen <= self.max_missed_frames:
@@ -501,7 +497,8 @@ class YOLODetector:
             # Structural girder criteria:
             # 1. Wide and predominantly horizontal (w >= min_bw, 2.5 <= aspect <= 18.0)
             # 2. Must be aloft with bright open air / sky below it (not a ground structure)
-            if 2.5 <= aspect <= 18.0 and bw >= min_bw and (gy1 > sky_y1 + 4):
+            # 3. Must be isolated in mid-air (not connecting through the bottom of the sky ROI)
+            if 2.5 <= aspect <= 18.0 and bw >= min_bw and (gy1 > sky_y1 + 4) and (gy2 < sky_y2 - int(h * 0.02)):
                 below_roi = frame[gy2 : min(h, gy2 + 40), gx1 : gx2]
                 if below_roi.size > 0:
                     below_v = cv2.cvtColor(below_roi, cv2.COLOR_BGR2HSV)[:, :, 2].mean()
@@ -518,6 +515,11 @@ class YOLODetector:
                         )
 
         return results
+
+    def reset(self) -> None:
+        """Clear temporal object tracker state (e.g. across scene cuts)."""
+        self.tracked_targets.clear()
+        self._last_detections.clear()
 
     def draw_detections(
         self,

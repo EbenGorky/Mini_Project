@@ -408,3 +408,7 @@ class MarkingDetector:
             )
         return generic_dets
 
+    def reset(self) -> None:
+        """Clear temporal tracked markings history (e.g. across scene cuts)."""
+        self.tracked_markings.clear()
+

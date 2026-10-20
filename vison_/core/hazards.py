@@ -137,8 +137,7 @@ class HazardEngine:
                     ]
                     cached_zone.breached_workers = breached_workers
                     cached_zone.is_breached = len(breached_workers) > 0
-                    if cached_zone.is_breached:
-                        cached_zone.risk_level = RiskLevel.HIGH
+                    cached_zone.risk_level = RiskLevel.HIGH if cached_zone.is_breached else RiskLevel.MEDIUM
                     active_zones.append(cached_zone)
                 else:
                     self._cached_zones.pop(zone_id, None)
@@ -242,8 +241,12 @@ class HazardEngine:
                 breached_workers.append(worker)
 
         # Check camera wearer (screen bottom center represents forward walking path)
+        # Only breaches wearer if this is an actual suspended load reaching the near foreground
         wearer_pt = (w // 2, int(h * 0.92))
-        wearer_in_zone = cv2.pointPolygonTest(int_poly, (float(wearer_pt[0]), float(wearer_pt[1])), False) >= 0
+        is_load = crane.category == HazardCategory.SUSPENDED_LOAD
+        wearer_in_zone = is_load and (floor_y > int(h * 0.78)) and (
+            cv2.pointPolygonTest(int_poly, (float(wearer_pt[0]), float(wearer_pt[1])), False) >= 0
+        )
 
         is_breached = len(breached_workers) > 0 or wearer_in_zone
 
@@ -435,7 +438,7 @@ class HazardEngine:
         smoothed_poly = self._smooth_polygon(zone_id, raw_poly)
         int_poly = smoothed_poly.astype(np.int32)
 
-        risk = RiskLevel.HIGH if is_danger else RiskLevel.MEDIUM
+        risk = RiskLevel.MEDIUM
         title = "RESTRICTED ACCESS" if is_danger else "CAUTION SIGN"
         msg = f"{sign.class_name.upper()} ahead — stop and check clearance!" if is_danger else "Caution sign ahead — proceed with vigilance."
 
@@ -499,4 +502,11 @@ class HazardEngine:
             smoothed += w * p
 
         return smoothed
+
+    def reset(self) -> None:
+        """Clear temporal hazard tracking history (e.g. across scene cuts)."""
+        self._cached_zones.clear()
+        self._zone_decay_counters.clear()
+        self._poly_history.clear()
+        self._last_active_zones.clear()
 
