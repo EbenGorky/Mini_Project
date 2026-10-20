@@ -49,7 +49,16 @@ detection:
 # Hazard & Risk Rules (for Milestone 3-5)
 hazards:
   smoothing_frames: 5
+  suspended_load_safety_margin: 1.8
+  ground_horizon_ratio: 0.75
+  ground_bottom_ratio: 0.95
   rules:
+    - condition: "crane_drop_zone_breach"
+      risk_level: "High"
+      message: "CRITICAL: Worker inside suspended load drop zone! Evacuate immediately!"
+    - condition: "crane_overhead"
+      risk_level: "Medium"
+      message: "Crane load suspended overhead — keep lifting radius clear"
     - condition: "machinery_proximity"
       risk_level: "High"
       message: "Vehicle ahead, move clear of its path"

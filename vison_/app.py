@@ -34,6 +34,7 @@ from core.capture import (
     validate_ip_address,
 )
 from core.detector import YOLODetector
+from core.hazards import HazardEngine, RiskLevel
 from core.overlay import OverlayUI
 
 
@@ -159,6 +160,10 @@ class HelmetVisionApp:
         print("[INFO] Initializing YOLO safety detector...")
         self.detector = YOLODetector(config=self.config)
 
+        # Initialize Hazard & Drop Zone Analysis Engine (Milestone 3)
+        print("[INFO] Initializing hazard & drop-zone analysis engine...")
+        self.hazard_engine = HazardEngine(config=self.config)
+
         self.running = False
 
     def on_connect_requested(self, new_ip: str) -> None:
@@ -227,16 +232,28 @@ class HelmetVisionApp:
 
                 # 3. Run AI object detection on live frame (Milestone 2)
                 detections = []
+                hazards = []
+                overall_risk = RiskLevel.LOW
+                suggestion_msg = None
+
                 if has_frame and frame is not None:
                     detections = self.detector.detect(frame)
                     status["inference_ms"] = round(self.detector.last_inference_ms, 1)
 
-                # 4. Render overlays (AI bounding boxes, HUD, control bar)
+                    # 4. Compute Danger Zones & Drop Zone Threats (Milestone 3)
+                    hazards, overall_risk, suggestion_msg = self.hazard_engine.process(frame.shape, detections)
+                    status["risk_level"] = overall_risk.value
+                    status["active_hazards"] = len(hazards)
+
+                # 5. Render overlays (AI bounding boxes, Drop Zones, HUD, Alert Banner, Control bar)
                 rendered = self.ui.draw(
                     frame if has_frame else None,
                     status,
                     detector=self.detector,
                     detections=detections,
+                    hazards=hazards,
+                    overall_risk=overall_risk,
+                    suggestion_msg=suggestion_msg,
                 )
 
                 # 4. Display or log
@@ -272,11 +289,13 @@ class HelmetVisionApp:
                         latency = status["latency_ms"]
                         attempts = status["reconnect_attempts"]
                         det_count = len(detections)
+                        haz_count = len(hazards)
+                        risk_str = overall_risk.value if overall_risk else "Low"
                         inf_ms = status.get("inference_ms", 0.0)
                         print(
                             f"[HEADLESS STATUS] State: {state.value:<12} | "
                             f"FPS: {fps:4.1f} | Latency: {latency:5.1f}ms | AI: {inf_ms:4.1f}ms | "
-                            f"Detections: {det_count} | URL: {status['url']}"
+                            f"Dets: {det_count} | Hazards: {haz_count} | Risk: {risk_str:<6} | URL: {status['url']}"
                         )
                     time.sleep(0.02)
 

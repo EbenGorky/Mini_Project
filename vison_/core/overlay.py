@@ -86,6 +86,9 @@ class OverlayUI:
         status: Dict[str, Any],
         detector: Optional[Any] = None,
         detections: Optional[List[Any]] = None,
+        hazards: Optional[List[Any]] = None,
+        overall_risk: Optional[Any] = None,
+        suggestion_msg: Optional[str] = None,
     ) -> np.ndarray:
         """
         Draw all overlays onto frame (or generate splash screen if frame is None).
@@ -114,13 +117,20 @@ class OverlayUI:
 
         state = status.get("state", StreamState.DISCONNECTED)
 
-        # Draw AI detections if active
-        if frame is not None and detector is not None and detections:
-            # Rescale detection boxes if target resolution differs from frame
+        # Scale factors if target resolution differs from raw frame
+        scale_x = 1.0
+        scale_y = 1.0
+        if frame is not None:
             h_orig, w_orig = frame.shape[:2]
             scale_x = self.target_width / w_orig if w_orig > 0 else 1.0
             scale_y = self.target_height / h_orig if h_orig > 0 else 1.0
 
+        # 1. Draw Ground Danger Zones (Drop zones, Crane threats)
+        if frame is not None and hazards:
+            self._draw_hazard_zones(canvas, hazards, scale_x, scale_y)
+
+        # 2. Draw AI detections (bounding boxes)
+        if frame is not None and detector is not None and detections:
             scaled_dets = []
             if scale_x != 1.0 or scale_y != 1.0:
                 for d in detections:
@@ -145,19 +155,119 @@ class OverlayUI:
 
             detector.draw_detections(canvas, scaled_dets)
 
-        # If camera offline or connecting with no frame, draw troubleshooting card
+        # 3. Draw On-Screen Alert / Suggestion Banner
+        if frame is not None and overall_risk and suggestion_msg:
+            self._draw_alert_banner(canvas, overall_risk, suggestion_msg)
+
+        # 4. If camera offline or connecting with no frame, draw troubleshooting card
         if frame is None or state in (StreamState.OFFLINE, StreamState.ERROR, StreamState.CONNECTING, StreamState.RECONNECTING):
             self._draw_splash_card(canvas, status)
 
-        # Draw top HUD stats banner
+        # 5. Draw top HUD stats banner
         if self.show_stats:
             self._draw_header_hud(canvas, status)
 
-        # Draw bottom interactive control bar
+        # 6. Draw bottom interactive control bar
         if self.show_control_bar:
             self._draw_control_bar(canvas, status)
 
         return canvas
+
+    def _draw_hazard_zones(
+        self,
+        canvas: np.ndarray,
+        hazards: List[Any],
+        scale_x: float,
+        scale_y: float,
+    ) -> None:
+        """Draw ground threat polygons, vertical tracers, and crane warning badges."""
+        overlay = canvas.copy()
+
+        for zone in hazards:
+            is_high = getattr(zone, "risk_level", None) == "High" or getattr(getattr(zone, "risk_level", None), "value", "") == "High"
+            color = self.c_red if is_high else self.c_amber
+
+            # 1. Scaled Ground Polygon
+            raw_poly = zone.ground_polygon
+            scaled_poly = (raw_poly * [scale_x, scale_y]).astype(np.int32)
+
+            # Fill semi-transparent ground hazard zone
+            cv2.fillPoly(overlay, [scaled_poly], color)
+
+            # 2. Draw Vertical Plumb / Tracer Lines
+            for p1, p2 in zone.vertical_tracers:
+                sp1 = (int(p1[0] * scale_x), int(p1[1] * scale_y))
+                sp2 = (int(p2[0] * scale_x), int(p2[1] * scale_y))
+                cv2.line(canvas, sp1, sp2, color, 2, cv2.LINE_AA)
+                cv2.circle(canvas, sp1, 4, color, -1)
+                cv2.circle(canvas, sp2, 4, color, -1)
+
+            # 3. Highlight Crane / Suspended Load source box
+            bx1, by1, bx2, by2 = zone.source_box
+            sbx1, sby1, sbx2, sby2 = int(bx1 * scale_x), int(by1 * scale_y), int(bx2 * scale_x), int(by2 * scale_y)
+            cv2.rectangle(canvas, (sbx1, sby1), (sbx2, sby2), color, 3, cv2.LINE_AA)
+            cv2.putText(
+                canvas,
+                "CRANE / SUSPENDED LOAD",
+                (sbx1 + 4, max(18, sby1 - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.46,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+
+            # 4. Badge on Ground Footprint
+            cx = int(scaled_poly[:, 0].mean())
+            cy = int(scaled_poly[:, 1].mean())
+            badge_txt = "⚠️ HIGH RISK: DROP ZONE" if is_high else "⚠️ DROP ZONE: SUSPENDED LOAD"
+            (tw, th), _ = cv2.getTextSize(badge_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+            cv2.rectangle(canvas, (cx - tw // 2 - 6, cy - th - 4), (cx + tw // 2 + 6, cy + 4), (15, 15, 15), -1)
+            cv2.rectangle(canvas, (cx - tw // 2 - 6, cy - th - 4), (cx + tw // 2 + 6, cy + 4), color, 1)
+            cv2.putText(canvas, badge_txt, (cx - tw // 2, cy - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.44, color, 1, cv2.LINE_AA)
+
+        # Blend semi-transparent polygons
+        alpha = 0.32
+        cv2.addWeighted(overlay, alpha, canvas, 1 - alpha, 0, canvas)
+
+        # Draw crisp outline borders on top
+        for zone in hazards:
+            is_high = getattr(zone, "risk_level", None) == "High" or getattr(getattr(zone, "risk_level", None), "value", "") == "High"
+            color = self.c_red if is_high else self.c_amber
+            scaled_poly = (zone.ground_polygon * [scale_x, scale_y]).astype(np.int32)
+            cv2.polylines(canvas, [scaled_poly], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
+
+    def _draw_alert_banner(self, canvas: np.ndarray, overall_risk: Any, message: str) -> None:
+        """Draw high-visibility safety alert suggestion banner below HUD."""
+        h, w = canvas.shape[:2]
+        is_high = overall_risk == "High" or getattr(overall_risk, "value", "") == "High"
+        banner_color = self.c_red if is_high else self.c_amber
+        banner_h = 36
+        banner_y1 = 48
+        banner_y2 = banner_y1 + banner_h
+
+        # Semi-transparent alert background
+        sub = canvas[banner_y1:banner_y2, 10:w-10].copy()
+        cv2.rectangle(sub, (0, 0), (w - 20, banner_h), (15, 15, 15), -1)
+        cv2.addWeighted(sub, 0.85, canvas[banner_y1:banner_y2, 10:w-10], 0.15, 0, canvas[banner_y1:banner_y2, 10:w-10])
+
+        # Border and indicator bar
+        cv2.rectangle(canvas, (10, banner_y1), (w - 10, banner_y2), banner_color, 2)
+        cv2.rectangle(canvas, (10, banner_y1), (22, banner_y2), banner_color, -1)
+
+        # Banner icon and message
+        icon = "[CRITICAL ALERT]" if is_high else "[SAFETY CAUTION]"
+        full_text = f"{icon} {message}"
+        cv2.putText(
+            canvas,
+            full_text,
+            (32, banner_y1 + 24),
+            cv2.FONT_HERSHEY_DUPLEX,
+            0.50,
+            (255, 255, 255) if is_high else (230, 230, 230),
+            1,
+            cv2.LINE_AA,
+        )
 
     def _draw_header_hud(self, canvas: np.ndarray, status: Dict[str, Any]) -> None:
         """Draw top banner with status badge, FPS, latency, and source."""

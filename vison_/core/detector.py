@@ -23,6 +23,8 @@ class HazardCategory(str, Enum):
     PPE_VEST = "PPE_VEST"
     NO_PPE = "NO_PPE"
     MACHINERY = "MACHINERY"
+    CRANE = "CRANE"
+    SUSPENDED_LOAD = "SUSPENDED_LOAD"
     SIGN = "SIGN"
     BARRIER = "BARRIER"
     HAZARD_TAPE = "HAZARD_TAPE"
@@ -73,6 +75,8 @@ class YOLODetector:
         HazardCategory.PPE_VEST: (50, 220, 50),     # Green
         HazardCategory.NO_PPE: (30, 30, 255),       # Bright Red
         HazardCategory.MACHINERY: (30, 70, 240),    # Orange-Red
+        HazardCategory.CRANE: (0, 140, 255),        # Deep Orange
+        HazardCategory.SUSPENDED_LOAD: (0, 0, 255), # Pure Red (Threat)
         HazardCategory.SIGN: (0, 215, 255),         # Yellow
         HazardCategory.BARRIER: (0, 140, 255),      # Orange
         HazardCategory.HAZARD_TAPE: (0, 215, 255),  # Yellow
@@ -137,7 +141,12 @@ class YOLODetector:
         print(f"[DETECTOR INFO] Model loaded successfully ({len(model.names)} classes).")
         return model
 
-    def categorize_class(self, class_name: str) -> HazardCategory:
+    def categorize_class(
+        self,
+        class_name: str,
+        box: Optional[Tuple[int, int, int, int]] = None,
+        frame_h: Optional[int] = None,
+    ) -> HazardCategory:
         """Map raw class name (COCO or custom construction) to hazard category."""
         name = class_name.lower().replace("-", "_").replace(" ", "_")
 
@@ -156,10 +165,28 @@ class YOLODetector:
         if "vest" in name or "safety_vest" in name:
             return HazardCategory.PPE_VEST
 
-        # Machinery & Vehicles
+        # Cranes & Overhead Rigging
+        if any(c in name for c in ("crane", "tower_crane", "mobile_crane", "derrick", "boom_crane")):
+            return HazardCategory.CRANE
+
+        # Suspended Load / Hook / Rigging
+        if any(s in name for s in ("suspended", "load", "hook", "rigging", "sling", "cargo_lift")):
+            return HazardCategory.SUSPENDED_LOAD
+
+        # High elevation machinery or objects in upper half of frame (sky / overhead)
+        if box and frame_h:
+            y1, y2 = box[1], box[3]
+            # Suspended aloft in sky/overhead (e.g. crane boom, hook, or misclassified kite/airplane)
+            if y2 < frame_h * 0.60:
+                if any(m in name for m in ("crane", "airplane", "kite", "bird", "boat")):
+                    return HazardCategory.CRANE
+                elif any(m in name for m in ("truck", "car", "train", "container", "box")):
+                    return HazardCategory.SUSPENDED_LOAD
+
+        # Machinery & Vehicles (on ground)
         if any(mach in name for mach in (
             "car", "truck", "bus", "train", "vehicle", "excavator",
-            "forklift", "loader", "crane", "tractor", "bulldozer", "roller"
+            "forklift", "loader", "tractor", "bulldozer", "roller"
         )):
             return HazardCategory.MACHINERY
 
@@ -209,12 +236,13 @@ class YOLODetector:
                     confs = boxes.conf.cpu().numpy()
                     classes = boxes.cls.cpu().numpy().astype(int)
 
+                    h_frame = frame.shape[0]
                     for box, conf, cls_id in zip(xyxy, confs, classes):
                         cls_name = self.model.names.get(cls_id, f"cls_{cls_id}")
-                        category = self.categorize_class(cls_name)
+                        x1, y1, x2, y2 = map(int, box)
+                        category = self.categorize_class(cls_name, box=(x1, y1, x2, y2), frame_h=h_frame)
                         color = self.CATEGORY_COLORS.get(category, (180, 180, 180))
 
-                        x1, y1, x2, y2 = map(int, box)
                         detections.append(
                             Detection(
                                 box=(x1, y1, x2, y2),
