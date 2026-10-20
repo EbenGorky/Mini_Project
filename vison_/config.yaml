@@ -40,18 +40,18 @@ video:
 # Detection settings (for Milestone 2+)
 detection:
   model_path: "models/yolov8n.pt"
-  confidence_threshold: 0.25
-  iou_threshold: 0.45
+  confidence_threshold: 0.15
+  iou_threshold: 0.40
   device: "cuda:0"             # Auto-detects and falls back to CPU
   imgsz: 640
   frame_skip: 0                # 0 = every frame on GPU
-  max_missed_frames: 10        # Keep tracking alive across split-second missed frames (~400ms)
-  min_iou_match: 0.20
+  max_missed_frames: 15        # Keep tracking alive across split-second missed frames (~600ms)
+  min_iou_match: 0.18
 
 # Hazard & Risk Rules (for Milestone 3-5)
 hazards:
   smoothing_frames: 5
-  zone_hold_frames: 10         # Hold drop zone steady across momentary detection drops
+  zone_hold_frames: 15         # Hold drop zone steady across momentary detection drops
   suspended_load_safety_margin: 1.8
   ground_horizon_ratio: 0.75
   ground_bottom_ratio: 0.95

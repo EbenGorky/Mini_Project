@@ -223,14 +223,18 @@ class YOLODetector:
         if any(s in name for s in ("suspended", "load", "hook", "rigging", "sling", "cargo_lift")):
             return HazardCategory.SUSPENDED_LOAD
 
-        # High elevation machinery or objects in upper half of frame (sky / overhead)
+        # High elevation crane structures & suspended loads aloft in mid-air
         if box and frame_h:
-            y1, y2 = box[1], box[3]
-            # Suspended aloft in sky/overhead (e.g. crane boom, hook, or misclassified kite/airplane)
-            if y2 < frame_h * 0.60:
-                if any(m in name for m in ("crane", "airplane", "kite", "bird", "boat")):
+            x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+
+            # 1. Crane vertical mast / boom (e.g. left tower structure)
+            if (any(c in name for c in ("crane", "bird")) or (x1 < 120 and y2 > frame_h * 0.50)):
+                if y1 < frame_h * 0.35 and (x1 < 250 or "crane" in name):
                     return HazardCategory.CRANE
-                elif any(m in name for m in ("truck", "car", "train", "container", "box")):
+
+            # 2. Suspended load (aloft in the air, starts high y1 < 0.50*H, hanging down above floor)
+            if any(s in name for s in ("kite", "airplane", "sports_ball", "sports ball", "boat", "load", "hook", "rigging", "container", "truck", "car", "box")):
+                if y1 < frame_h * 0.50 and y2 < frame_h * 0.88:
                     return HazardCategory.SUSPENDED_LOAD
 
         # Machinery & Vehicles (on ground)
